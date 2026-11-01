@@ -222,6 +222,8 @@ export class CoreSim {
   private maintenanceCooldownTimer = 45;
   private stableFreqTimer = 0;
   private internationalTradesCount = 0;
+  private frameCashflowEuros = 0;
+  private smoothedCashflowPerSec = 0;
 
   constructor() {
     this.reset();
@@ -293,6 +295,7 @@ export class CoreSim {
       scoreMWhDelivered: 0,
       curtailedEnergyMWh: 0,
       budgetEuros: 150,
+      netCashflowPerSec: 0,
       etsPenaltyEuros: 0,
       marketPriceEurMWh: 65,
       interconnFlowMW: 0,
@@ -330,9 +333,11 @@ export class CoreSim {
       }
     };
     
-    this.isPaused = false;
+    this.isPaused = true;
     this.speedMultiplier = 1.0;
     this.isWeeklyUpgradePending = false;
+    this.frameCashflowEuros = 0;
+    this.smoothedCashflowPerSec = 0;
   }
 
   update(deltaSec: number) {
@@ -342,6 +347,7 @@ export class CoreSim {
 
     const effectiveDt = deltaSec * this.speedMultiplier;
     this.telemetry.gameTimeSec += effectiveDt;
+    this.frameCashflowEuros = 0;
 
     if (this.notificationMessage) {
       this.notificationMessage.timer -= deltaSec;
@@ -362,6 +368,7 @@ export class CoreSim {
       omCost = (baseRate + this.lines.length * 0.02 + activeGenCount * 0.03) * effectiveDt;
     }
     this.telemetry.budgetEuros = Math.max(0, Math.round((this.telemetry.budgetEuros - omCost) * 10) / 10);
+    this.frameCashflowEuros -= omCost;
 
     // Liquidació contínua de la interconnexió MAT amb França (respecta pausa i velocitat)
     if (this.telemetry.interconnFlowMW !== 0) {
@@ -371,11 +378,13 @@ export class CoreSim {
         // Exportant 300 MW cap a França: ingressos continus segons preu spot
         const exportRev = (this.telemetry.marketPriceEurMWh * 0.035) * effectiveDt;
         this.telemetry.budgetEuros = Math.round((this.telemetry.budgetEuros + exportRev) * 10) / 10;
+        this.frameCashflowEuros += exportRev;
       } else if (this.telemetry.interconnFlowMW > 0) {
         // Important 300 MW des de França: cost continu segons preu spot
         const importCost = (this.telemetry.marketPriceEurMWh * 0.04) * effectiveDt;
         if (this.telemetry.budgetEuros >= importCost) {
           this.telemetry.budgetEuros = Math.max(0, Math.round((this.telemetry.budgetEuros - importCost) * 10) / 10);
+          this.frameCashflowEuros -= importCost;
         } else {
           this.telemetry.interconnFlowMW = 0;
           this.notify("⚠️ S'ha aturat la importació amb França per falta de pressupost.", true);
@@ -434,6 +443,14 @@ export class CoreSim {
 
     // 10. Check defeat conditions
     this.checkDefeatConditions(effectiveDt);
+
+    // 11. Smooth net economic cashflow rate (k€/s)
+    if (effectiveDt > 0.001) {
+      const instantRate = this.frameCashflowEuros / effectiveDt;
+      const alpha = Math.min(1, effectiveDt * 1.5);
+      this.smoothedCashflowPerSec = this.smoothedCashflowPerSec * (1 - alpha) + instantRate * alpha;
+      this.telemetry.netCashflowPerSec = Math.round(this.smoothedCashflowPerSec * 10) / 10;
+    }
   }
 
   // Check if player completes level missions and has built lines to unlock next levels
@@ -986,6 +1003,7 @@ export class CoreSim {
     }
 
     this.telemetry.missions = this.allMissions.filter(m => m.level === this.currentLevel);
+    this.checkLevelProgression();
   }
 
   private completeMission(m: LevelMission) {
@@ -1243,6 +1261,7 @@ export class CoreSim {
               const etsCost = (emittedKg / 1000) * 1.8;
               this.telemetry.etsPenaltyEuros = Math.round((this.telemetry.etsPenaltyEuros + etsCost) * 10) / 10;
               this.telemetry.budgetEuros = Math.max(0, Math.round((this.telemetry.budgetEuros - etsCost) * 10) / 10);
+              this.frameCashflowEuros -= etsCost;
             }
             node.isGasActive = true;
           } else {
@@ -1281,10 +1300,7 @@ export class CoreSim {
       this.telemetry.co2EmissionsAccumulated = Math.max(0, this.telemetry.co2EmissionsAccumulated - naturalAbsorptionKg);
     }
 
-    this.telemetry.totalGenerationMW = activeGenMW;
-    this.telemetry.renewablePercentage = activeGenMW > 0 
-      ? Math.round((renewableMW / activeGenMW) * 100) 
-      : 0;
+    this.recomputeGenerationBreakdown();
     this.renewableSamples.push(this.telemetry.renewablePercentage);
 
     // Dynamic CO2 Alert Levels (Protocol d'Episodis Ambientals de Catalunya)
@@ -1298,8 +1314,57 @@ export class CoreSim {
     } else {
       this.telemetry.co2AlertLevel = 'OPTIMAL';
     }
+  }
 
-    // Real-time Catalan Generation Breakdown & Leader calculation
+  private recomputeGenerationBreakdown() {
+    let activeGenMW = 0;
+    let renewableMW = 0;
+    let nuclearMW = 0;
+    let solarMW = 0;
+    let windMW = 0;
+    let hydroMW = 0;
+    let gasMW = 0;
+    let biomassMW = 0;
+
+    for (const node of this.nodes) {
+      if (node.type !== 'GENERATOR' || !node.generatorType || !this.isNodeConnected(node.id)) continue;
+      const power = node.currentPower || 0;
+      activeGenMW += power;
+
+      switch (node.generatorType) {
+        case 'NUCLEAR':
+          nuclearMW += power;
+          break;
+        case 'SOLAR':
+          solarMW += power;
+          renewableMW += power;
+          break;
+        case 'WIND':
+          windMW += power;
+          renewableMW += power;
+          break;
+        case 'HYDRO_PUMP':
+          hydroMW += power;
+          renewableMW += power;
+          break;
+        case 'GAS_COMBINED':
+          gasMW += power;
+          if (node.hasGreenHydrogen100) {
+            renewableMW += power;
+          }
+          break;
+        case 'BIOMASS':
+          biomassMW += power;
+          renewableMW += power;
+          break;
+      }
+    }
+
+    this.telemetry.totalGenerationMW = activeGenMW;
+    this.telemetry.renewablePercentage = activeGenMW > 0
+      ? Math.round((renewableMW / activeGenMW) * 100)
+      : 0;
+
     const sourcesList: EnergySourceStats[] = [
       { type: 'NUCLEAR', name: 'Nuclear', icon: '⚛️', mw: nuclearMW, pct: activeGenMW > 0 ? Math.round((nuclearMW / activeGenMW) * 100) : 0, color: '#9333EA' },
       { type: 'GAS_COMBINED', name: 'Cicle Combinat (Gas)', icon: '🔥', mw: gasMW, pct: activeGenMW > 0 ? Math.round((gasMW / activeGenMW) * 100) : 0, color: '#EA580C' },
@@ -1492,10 +1557,13 @@ export class CoreSim {
         const indEts = (indEmittedKg / 1000) * 0.8;
         this.telemetry.etsPenaltyEuros = Math.round((this.telemetry.etsPenaltyEuros + indEts) * 10) / 10;
         this.telemetry.budgetEuros = Math.max(0, Math.round((this.telemetry.budgetEuros - indEts) * 10) / 10);
+        this.frameCashflowEuros -= indEts;
       }
 
       let timer = (this.nodeSpawnTimers.get(node.id) || 0) + dt;
-      const interval = Math.max(3.5, 2000 / Math.max(50, calculatedDemand));
+      const baseInterval = Math.max(3.5, 2000 / Math.max(50, calculatedDemand));
+      // Els nodes que encara no estan connectats acumulen demanda més lentament per donar marge de planificació
+      const interval = isConnected ? baseInterval : baseInterval * 1.8;
 
       if (timer >= interval) {
         timer = 0;
@@ -1766,6 +1834,7 @@ export class CoreSim {
         // Tarifa punta per cobrir buits de demanda
         const peakRev = Math.round((this.currentLevel === 1 ? 0.80 : 0.55) * priceFactor * 10) / 10;
         this.telemetry.budgetEuros = Math.round((this.telemetry.budgetEuros + peakRev) * 10) / 10;
+        this.frameCashflowEuros += peakRev;
         this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'ABSORB');
         return;
       }
@@ -1787,6 +1856,7 @@ export class CoreSim {
       this.telemetry.scoreMWhDelivered += CONFIG.PACKET_SIZE_MWH;
       const baseRev = Math.round((this.currentLevel === 1 ? 0.35 : 0.15) * priceFactor * 10) / 10;
       this.telemetry.budgetEuros = Math.round((this.telemetry.budgetEuros + baseRev) * 10) / 10;
+      this.frameCashflowEuros += baseRev;
       this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'ABSORB');
       return;
     }
@@ -1794,25 +1864,35 @@ export class CoreSim {
     if (node.type === 'SUBSTATION') {
       const bCount = node.batteryCount || (node.hasBattery ? 1 : 0);
       const maxQ = node.maxGenerationQueue || 8;
+      const curQ = node.generationQueue || 0;
 
-      // 1. Si la subestació té bateries i no estan al 100%, absorbeix l'energia i s'emmagatzema!
-      if (bCount > 0 && (node.batteryStorage || 0) < 100) {
-        node.batteryStorage = Math.min(100, (node.batteryStorage || 0) + (12 / bCount));
-        node.batteryMode = 'CHARGING';
-        this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'CONVERTER');
-        return;
-      }
-
-      // 2. Si hi ha lloc a la cua de transformació per al trànsit immediat, desa també l'origen real del paquet:
-      if ((node.generationQueue || 0) < maxQ) {
-        node.generationQueue = (node.generationQueue || 0) + 1;
+      // 1. Prioritat al subministrament de les ciutats: mantingues almenys 2 paquets a la cua de transformació
+      if (curQ < 2) {
+        node.generationQueue = curQ + 1;
         if (!node.substationPacketSources) node.substationPacketSources = [];
         node.substationPacketSources.push(packet.sourceType);
         this.spawnParticle(node.pos.x, node.pos.y, '#38BDF8', 'CONVERTER');
         return;
       }
 
-      // 3. CURTAILMENT / VESSAMENT: Cua plena i sense bateries -> L'energia es perd!
+      // 2. Un cop cobert el coixí bàsic de trànsit, si té bateries BESS i no estan al 100%, emmagatzema l'excedent!
+      if (bCount > 0 && (node.batteryStorage || 0) < 100) {
+        node.batteryStorage = Math.min(100, (node.batteryStorage || 0) + (8 / bCount));
+        node.batteryMode = 'CHARGING';
+        this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'CONVERTER');
+        return;
+      }
+
+      // 3. Si hi ha lloc a la cua de transformació per al trànsit immediat, desa també l'origen real del paquet:
+      if (curQ < maxQ) {
+        node.generationQueue = curQ + 1;
+        if (!node.substationPacketSources) node.substationPacketSources = [];
+        node.substationPacketSources.push(packet.sourceType);
+        this.spawnParticle(node.pos.x, node.pos.y, '#38BDF8', 'CONVERTER');
+        return;
+      }
+
+      // 4. CURTAILMENT / VESSAMENT: Cua plena i sense bateries -> L'energia es perd!
       this.telemetry.curtailedEnergyMWh += CONFIG.PACKET_SIZE_MWH;
       this.spawnParticle(node.pos.x, node.pos.y, '#F59E0B', 'JOULE');
       return;
@@ -1881,28 +1961,32 @@ export class CoreSim {
         // Discharging during evening peak, night, or under-frequency when connected
         else if (isNightOrPeak && (node.batteryStorage || 0) > 0) {
           node.batteryMode = 'DISCHARGING';
-          node.batteryStorage = Math.max(0, (node.batteryStorage || 0) - dt * 2.0);
+          node.batteryStorage = Math.max(0, (node.batteryStorage || 0) - dt * 1.8);
 
-          // Clear local demand slots if consumer
-          if (node.type === 'CONSUMER' && node.demandSlots > 0) {
-            node.demandSlots = Math.max(0, node.demandSlots - 1);
-            this.telemetry.scoreMWhDelivered += CONFIG.PACKET_SIZE_MWH;
-            this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'ABSORB');
-          }
-          // If substation, spawn battery energy packet to connected needy consumer!
-          else if (node.type === 'SUBSTATION') {
-            const outgoingDist = this.lines.filter(
-              l => !l.isTripped && l.voltage === 'DISTRIBUTION' && l.nodeIds.includes(node.id) && l.currentPacketsCount < l.maxCapacity
-            );
-            for (const dLine of outgoingDist) {
-              const targetId = dLine.nodeIds.find(id => id !== node.id);
-              const targetNode = this.nodes.find(n => n.id === targetId);
-              if (targetNode && targetNode.demandSlots > 0) {
-                this.spawnPacket(dLine, node.id, targetId!, 'SOLAR');
-                break;
+          const bessKey = `${node.id}-bess`;
+          let bessTimer = (this.nodeSpawnTimers.get(bessKey) || 0) + dt;
+          const bessInterval = Math.max(0.65, 2.2 / bCount);
+
+          if (bessTimer >= bessInterval) {
+            bessTimer = 0;
+            // Clear local demand slots if consumer
+            if (node.type === 'CONSUMER' && node.demandSlots > 0) {
+              node.demandSlots = Math.max(0, node.demandSlots - 1);
+              this.telemetry.scoreMWhDelivered += CONFIG.PACKET_SIZE_MWH;
+              this.spawnParticle(node.pos.x, node.pos.y, '#10B981', 'ABSORB');
+            }
+            // If substation, feed generationQueue so Smart Grid routes to local or MAT needy consumers!
+            else if (node.type === 'SUBSTATION') {
+              const curQ = node.generationQueue || 0;
+              if (curQ < 5) {
+                node.generationQueue = curQ + 1;
+                if (!node.substationPacketSources) node.substationPacketSources = [];
+                node.substationPacketSources.push('SOLAR');
+                this.spawnParticle(node.pos.x, node.pos.y, '#38BDF8', 'CONVERTER');
               }
             }
           }
+          this.nodeSpawnTimers.set(bessKey, bessTimer);
         } else {
           node.batteryMode = 'IDLE';
         }
@@ -1968,14 +2052,8 @@ export class CoreSim {
           }
         }
 
-        // Recomputa la generació total reflectint l'ajust automàtic AGC
-        let recomputedGen = 0;
-        for (const n of this.nodes) {
-          if (n.type === 'GENERATOR' && this.isNodeConnected(n.id)) {
-            recomputedGen += n.currentPower;
-          }
-        }
-        this.telemetry.totalGenerationMW = recomputedGen;
+        // Recomputa la generació total i el desglossament del Mix reflectint l'ajust automàtic AGC
+        this.recomputeGenerationBreakdown();
       }
     }
 
@@ -2268,17 +2346,46 @@ export class CoreSim {
     this.notify(`🗑️ Línia desmantellada: recuperats ${line.lengthKm} km de cable i reemborsats +${refund} k€ (70% de l'obra).`, false);
   }
 
+  reinforceLine(lineId: string): boolean {
+    const line = this.lines.find(l => l.id === lineId);
+    if (!line) return false;
+    if (line.isReinforced) {
+      this.notify("⚠️ Aquesta línia ja està reforçada en Doble Circuit (x2)!", true);
+      return false;
+    }
+
+    const cost = Math.max(20, Math.round(line.lengthKm * (line.voltage === 'MAT' ? 0.25 : 0.15)));
+    if (this.telemetry.budgetEuros < cost) {
+      this.notify(`⚠️ Pressupost insuficient! Reforçar aquesta línia en Doble Circuit costa ${cost} k€ (en tens ${Math.round(this.telemetry.budgetEuros)} k€).`, true);
+      return false;
+    }
+
+    this.telemetry.budgetEuros = Math.max(0, Math.round((this.telemetry.budgetEuros - cost) * 10) / 10);
+    line.isReinforced = true;
+    line.maxCapacity = line.maxCapacity * CONFIG.REINFORCED_MULTIPLIER;
+    this.inventory.reinforcedLinesTotal += 1;
+
+    const n1 = this.nodes.find(n => n.id === line.nodeIds[0]);
+    const n2 = this.nodes.find(n => n.id === line.nodeIds[1]);
+    if (n1 && n2) {
+      this.spawnParticle((n1.pos.x + n2.pos.x) / 2, (n1.pos.y + n2.pos.y) / 2, '#38BDF8', 'CONVERTER');
+    }
+
+    this.notify(`💪 Línia reforçada en Doble Circuit (x2): Capacitat ampliada a ${line.maxCapacity} paquets i blindada contra temporals! (-${cost} k€)`, false);
+    return true;
+  }
+
   toggleBatteryOnNode(nodeId: string): boolean {
     const node = this.nodes.find(n => n.id === nodeId);
     if (!node) return false;
 
     if (node.type === 'GENERATOR' && node.generatorType !== 'HYDRO_PUMP') {
-      this.notify("⚠️ Les bateries BESS s'instal·len a Subestacions (fins a 4 mòduls) o Nodes Consumidors per emmagatzemar energia.", true);
+      this.notify("⚠️ Les bateries BESS s'instal·len a Subestacions (fins a 6 mòduls) o Nodes Consumidors (fins a 4 mòduls) per emmagatzemar energia.", true);
       return false;
     }
 
     const currentCount = node.batteryCount || (node.hasBattery ? 1 : 0);
-    const maxBatteries = node.type === 'SUBSTATION' ? 4 : 2;
+    const maxBatteries = node.type === 'SUBSTATION' ? 6 : 4;
 
     if (currentCount >= maxBatteries) {
       this.notify(`⚠️ Aquest node ja té el límit màxim de bateries (${maxBatteries} mòduls BESS).`, true);

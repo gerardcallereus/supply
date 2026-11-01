@@ -40,6 +40,8 @@ interface EducationalTooltipProps {
   lines?: PowerLine[];
   nodes?: GridNode[];
   onRemoveLine?: (lineId: string) => void;
+  onReinforceLine?: (lineId: string) => void;
+  onRemoveBattery?: (nodeId: string) => void;
   dragState: {
     isDragging: boolean;
     startNode: GridNode | null;
@@ -64,6 +66,8 @@ export const EducationalTooltip: React.FC<EducationalTooltipProps> = ({
   lines = [],
   nodes = [],
   onRemoveLine,
+  onReinforceLine,
+  onRemoveBattery,
   dragState,
   selectedTool,
   lang,
@@ -153,9 +157,9 @@ export const EducationalTooltip: React.FC<EducationalTooltipProps> = ({
       dragState.currentWorldPos.x - startNode.pos.x,
       dragState.currentWorldPos.y - startNode.pos.y
     );
-    const distKm = Math.max(1, Math.round(distPx * 0.45));
-    const layingCost = Math.round(distKm * (isMAT ? 0.35 : 0.20));
-    const lossPct = isMAT ? (distKm * 0.035).toFixed(1) : (distKm * 0.16).toFixed(1);
+    const distKm = Math.max(3, Math.round(distPx * CONFIG.KM_PER_COORD_UNIT));
+    const layingCost = Math.round(distKm * (isMAT ? 0.35 : 0.20) * 10) / 10;
+    const lossPct = isMAT ? (distKm * 0.015).toFixed(1) : (distKm * 0.08).toFixed(1);
 
     // Cable stock & rules validation
     let validation = { ok: true, msg: 'Arrossega fins a la destinació i deixa anar per establir connexió.', isPending: true };
@@ -743,16 +747,29 @@ export const EducationalTooltip: React.FC<EducationalTooltipProps> = ({
                   </div>
                   {(() => {
                     const availableBatteries = Math.max(0, inventory.batteriesTotal - inventory.batteriesUsed);
-                    const canInstall = availableBatteries > 0 || budgetEuros >= 120;
+                    const curBess = activeNode.batteryCount || (activeNode.hasBattery ? 1 : 0);
+                    const maxBess = activeNode.type === 'SUBSTATION' ? 6 : 4;
+                    const canInstall = curBess < maxBess && (availableBatteries > 0 || budgetEuros >= 120);
                     return (
-                      <button
-                        onClick={() => onInstallNodeUpgrade(activeNode.id, 'BATTERY')}
-                        disabled={!canInstall}
-                        className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs font-mono transition-all shadow-xs cursor-pointer"
-                        title={availableBatteries > 0 ? "Instal·la un mòdul des de l'inventari (de franc)" : "Compra i instal·la un mòdul nou per 120 k€"}
-                      >
-                        {availableBatteries > 0 ? `+1 BESS (${availableBatteries} disp.)` : '+1 BESS (120 k€)'}
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {curBess > 0 && onRemoveBattery && (
+                          <button
+                            onClick={() => onRemoveBattery(activeNode.id)}
+                            className="px-2 py-1 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-rose-500 hover:text-white text-slate-700 dark:text-slate-200 font-bold text-xs font-mono transition-all cursor-pointer"
+                            title="Retira 1 mòdul BESS i retorna'l a l'inventari"
+                          >
+                            -1
+                          </button>
+                        )}
+                        <button
+                          onClick={() => onInstallNodeUpgrade(activeNode.id, 'BATTERY')}
+                          disabled={!canInstall}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold text-xs font-mono transition-all shadow-xs cursor-pointer"
+                          title={availableBatteries > 0 ? "Instal·la un mòdul des de l'inventari (de franc)" : "Compra i instal·la un mòdul nou per 120 k€"}
+                        >
+                          {curBess >= maxBess ? 'Màx.' : availableBatteries > 0 ? `+1 BESS (${availableBatteries} disp.)` : '+1 BESS (120 k€)'}
+                        </button>
+                      </div>
                     );
                   })()}
                 </div>
@@ -1144,32 +1161,50 @@ export const EducationalTooltip: React.FC<EducationalTooltipProps> = ({
                       const isMAT = line.voltage === 'MAT';
                       const layingCost = Math.round(line.lengthKm * (isMAT ? 0.35 : 0.20) * 10) / 10;
                       const refund = Math.round(layingCost * 0.70 * 10) / 10;
+                      const reinforceCost = Math.max(20, Math.round(line.lengthKm * (isMAT ? 0.25 : 0.15)));
                       return (
                         <div
                           key={line.id}
-                          className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2 text-[11px]"
+                          className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-1.5 text-[11px]"
                         >
                           <div className="min-w-0 flex-1">
                             <div className="font-bold text-slate-800 dark:text-slate-100 truncate">
                               ↔ {otherNode ? otherNode.name : otherId}
                             </div>
-                            <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                            <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 flex items-center gap-1 flex-wrap">
                               <span className={isMAT ? 'text-orange-600 dark:text-orange-400 font-bold' : 'text-sky-600 dark:text-sky-400 font-bold'}>
                                 {isMAT ? 'MAT 400kV' : 'Dist 25kV'}
                               </span>
-                              {' • '}{line.lengthKm} km
+                              <span>• {line.lengthKm} km</span>
+                              {line.isReinforced && (
+                                <span className="px-1.5 py-0.2 rounded bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 font-bold">
+                                  💪 Doble x2
+                                </span>
+                              )}
                             </div>
                           </div>
-                          {onRemoveLine && (
-                            <button
-                              onClick={() => onRemoveLine(line.id)}
-                              className="shrink-0 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-600 hover:text-white text-rose-600 dark:text-rose-400 font-mono font-bold text-[10px] transition-colors cursor-pointer flex items-center gap-1"
-                              title={`Desmantella aquesta línia: recupera ${line.lengthKm} km de cable i +${refund} k€`}
-                            >
-                              <Scissors className="w-3 h-3" />
-                              <span>+{refund} k€</span>
-                            </button>
-                          )}
+                          <div className="flex items-center gap-1 shrink-0">
+                            {!line.isReinforced && onReinforceLine && (
+                              <button
+                                onClick={() => onReinforceLine(line.id)}
+                                disabled={budgetEuros < reinforceCost}
+                                className="px-2 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-600 hover:text-white disabled:opacity-40 text-indigo-600 dark:text-indigo-400 font-mono font-bold text-[10px] transition-colors cursor-pointer"
+                                title={`Reforça en Doble Circuit (x2 capacitat i immune a la Tramuntana) per ${reinforceCost} k€`}
+                              >
+                                💪 x2 ({reinforceCost} k€)
+                              </button>
+                            )}
+                            {onRemoveLine && (
+                              <button
+                                onClick={() => onRemoveLine(line.id)}
+                                className="px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-600 hover:text-white text-rose-600 dark:text-rose-400 font-mono font-bold text-[10px] transition-colors cursor-pointer flex items-center gap-1"
+                                title={`Desmantella aquesta línia: recupera ${line.lengthKm} km de cable i +${refund} k€`}
+                              >
+                                <Scissors className="w-3 h-3" />
+                                <span>+{refund} k€</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -1227,16 +1262,16 @@ export const EducationalTooltip: React.FC<EducationalTooltipProps> = ({
               </span>
             </div>
             <div>
-              <span className="text-[9px] uppercase tracking-wider text-slate-400 block">Pèrdues Joule</span>
-              <span className="font-bold text-orange-600 dark:text-orange-400">
-                {isMAT ? '~1.5%' : '~8-15%'}
+              <span className="text-[9px] uppercase tracking-wider text-slate-400 block">Secció del Cable</span>
+              <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                {hoverLine.isReinforced ? '💪 Doble Circuit (x2)' : 'Circuit Simple'}
               </span>
             </div>
           </div>
 
           <div className="text-[11px] text-rose-600 dark:text-rose-400 flex items-center gap-1.5 border-t border-slate-100 dark:border-slate-800 pt-2">
             <Scissors className="w-3.5 h-3.5 shrink-0" />
-            <span><strong>Com desmuntar:</strong> Clic dret o eina Tisores (Tecla 3) per recuperar el cable.</span>
+            <span><strong>Consell:</strong> Clic dret per desmuntar, o clica un dels seus nodes per reforçar-la en Doble Circuit (x2).</span>
           </div>
         </div>
 

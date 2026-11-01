@@ -124,7 +124,8 @@ export class Renderer {
     // 3. Draw Main Rivers with Realistic Course
     this.drawRivers(dayFactor);
 
-    // 4. Draw Power Lines (MAT and Distribution)
+    // 4. Draw Power Lines (MAT and Distribution) & France International Corridor
+    this.drawFranceInterconnectionCorridor(sim.nodes, sim.lines, sim.telemetry, dayFactor);
     this.drawPowerLines(sim.lines, sim.nodes, interaction, dayFactor, sim.packets);
 
     // 5. Draw Interactive Drag Ghost Line
@@ -136,8 +137,8 @@ export class Renderer {
     // 7. Draw Spark Particles (Joule heating, overloads, transformers)
     this.drawSparks(sim.sparks);
 
-    // 8. Draw Grid Nodes with Queue and Demand Indicators
-    this.drawNodes(sim.nodes, sim.telemetry, sim.weather, dayFactor, interaction);
+    // 8. Draw Grid Nodes with Queue, Demand, Connection Status and Name Labels
+    this.drawNodes(sim.nodes, sim.lines, sim.telemetry, sim.weather, dayFactor, interaction);
 
     ctx.restore();
 
@@ -228,6 +229,99 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.fillText(river.name, mid.x + 8, mid.y - 4);
     }
+  }
+
+  // Draw International MAT 400 kV Corridor (SE Santa Llogaia / Figueres <-> Baixas / Perpinyà, França)
+  private drawFranceInterconnectionCorridor(
+    nodes: GridNode[],
+    lines: PowerLine[],
+    telemetry: any,
+    dayFactor: number
+  ) {
+    const figNode = nodes.find(n => n.id === 'sub-figueres-franca');
+    if (!figNode) return;
+
+    const ctx = this.ctx;
+    const isConnected = lines.some(l => !l.isTripped && l.voltage === 'MAT' && l.nodeIds.includes('sub-figueres-franca'));
+    const flowMW = telemetry?.interconnFlowMW || 0;
+    const baikasPos = { x: figNode.pos.x - 18, y: figNode.pos.y - 95 };
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    // Outer casing
+    ctx.strokeStyle = dayFactor > 0.4 ? 'rgba(15, 23, 42, 0.35)' : 'rgba(2, 6, 23, 0.70)';
+    ctx.lineWidth = isConnected ? 8 : 5;
+    ctx.beginPath();
+    ctx.moveTo(figNode.pos.x, figNode.pos.y);
+    ctx.lineTo(baikasPos.x, baikasPos.y);
+    ctx.stroke();
+
+    // Inner corridor line
+    ctx.strokeStyle = !isConnected
+      ? 'rgba(148, 163, 184, 0.6)'
+      : flowMW < 0
+        ? '#10B981'
+        : flowMW > 0
+          ? '#F43F5E'
+          : '#EA580C';
+    ctx.lineWidth = isConnected ? 4.5 : 2.5;
+    if (!isConnected) ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(figNode.pos.x, figNode.pos.y);
+    ctx.lineTo(baikasPos.x, baikasPos.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Animated flow chevrons if importing or exporting
+    if (isConnected && flowMW !== 0) {
+      const fromPos = flowMW < 0 ? figNode.pos : baikasPos;
+      const toPos = flowMW < 0 ? baikasPos : figNode.pos;
+      const dx = toPos.x - fromPos.x;
+      const dy = toPos.y - fromPos.y;
+      const angle = Math.atan2(dy, dx);
+      const offset = (this.animTime * 1.1) % 1;
+
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.6;
+      for (let i = 0; i < 3; i++) {
+        const t = ((i + offset) / 3) % 1;
+        if (t < 0.15 || t > 0.85) continue;
+        const cx = fromPos.x + dx * t;
+        const cy = fromPos.y + dy * t;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(-3.5, -3);
+        ctx.lineTo(2, 0);
+        ctx.lineTo(-3.5, 3);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // French Terminal Node (SE Baixas - Perpinyà)
+    ctx.fillStyle = isConnected ? '#1E293B' : '#475569';
+    ctx.strokeStyle = flowMW < 0 ? '#10B981' : flowMW > 0 ? '#F43F5E' : '#EA580C';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(baikasPos.x - 42, baikasPos.y - 11, 84, 22, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 8.5px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const label = flowMW < 0
+      ? '🇫🇷 Baixas (-300 MW)'
+      : flowMW > 0
+        ? '🇫🇷 Baixas (+300 MW)'
+        : '🇫🇷 Enllaç França';
+    ctx.fillText(label, baikasPos.x, baikasPos.y);
+
+    ctx.restore();
   }
 
   // Draw lines
@@ -448,7 +542,7 @@ export class Renderer {
     const dy = interaction.dragCurrentWorldPos.y - startNode.pos.y;
     const pixelDist = Math.sqrt(dx * dx + dy * dy);
     const lengthKm = Math.max(3, Math.round(pixelDist * CONFIG.KM_PER_COORD_UNIT));
-    const lossPct = isMAT ? (lengthKm * 0.015).toFixed(1) : (lengthKm * 0.08).toFixed(1);
+    const layingCost = Math.round(lengthKm * (isMAT ? 0.35 : 0.20) * 10) / 10;
 
     ctx.save();
     ctx.strokeStyle = ghostColor;
@@ -460,6 +554,29 @@ export class Renderer {
     ctx.moveTo(startNode.pos.x, startNode.pos.y);
     ctx.lineTo(interaction.dragCurrentWorldPos.x, interaction.dragCurrentWorldPos.y);
     ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Floating distance & cost pill badge at midpoint of dragged line
+    if (pixelDist > 15) {
+      const midX = (startNode.pos.x + interaction.dragCurrentWorldPos.x) / 2;
+      const midY = (startNode.pos.y + interaction.dragCurrentWorldPos.y) / 2 - 12;
+      const badgeText = `${lengthKm} km • ${layingCost} k€`;
+      ctx.font = 'bold 9.5px monospace';
+      const tw = ctx.measureText(badgeText).width + 12;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+      ctx.strokeStyle = ghostColor;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.roundRect(midX - tw / 2, midY - 8, tw, 16, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(badgeText, midX, midY);
+    }
+
     ctx.restore();
   }
 
@@ -535,6 +652,7 @@ export class Renderer {
   // Draw Grid Nodes
   private drawNodes(
     nodes: GridNode[], 
+    lines: PowerLine[],
     telemetry: any, 
     weather: any, 
     dayFactor: number, 
@@ -546,10 +664,24 @@ export class Renderer {
       const { x, y } = node.pos;
       const isHovered = interaction.hoverNodeId === node.id;
       const r = node.type === 'GENERATOR' ? CONFIG.NODE_RADIUS_LARGE : CONFIG.NODE_RADIUS_MEDIUM;
+      const isConnected = lines.some(l => !l.isTripped && l.nodeIds.includes(node.id));
 
       // 0. Nighttime "Living City" light clusters & brownout flicker
       if (node.type === 'CONSUMER' && dayFactor < 0.6) {
         this.drawNightCityGlow(ctx, node, x, y, r, dayFactor);
+      }
+
+      // 0b. Unconnected node pulsing amber halo so players spot unwired cities/plants immediately
+      if (!isConnected) {
+        const pulse = 0.35 + 0.35 * Math.sin(this.animTime * 4);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, r + 5.5, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(245, 158, 11, ${pulse})`;
+        ctx.lineWidth = 2.2;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.restore();
       }
 
       // 1. Critical Alarm / Blackout timer circle
@@ -603,7 +735,79 @@ export class Renderer {
         this.drawBatteryBadge(node, x + r + 4, y - r);
       }
       this.drawNodeUpgradeBadges(node, x, y, r);
+
+      // 6. On-Map Node Name & Active Power Label
+      this.drawNodeMapLabel(node, x, y, r, isConnected, isHovered, dayFactor);
     }
+  }
+
+  private drawNodeMapLabel(
+    node: GridNode,
+    x: number,
+    y: number,
+    r: number,
+    isConnected: boolean,
+    isHovered: boolean,
+    dayFactor: number
+  ) {
+    if (this.camera.zoom < 0.75 && !isHovered) return;
+
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Concise geographic name for clean map legibility
+    const shortName = node.name
+      .replace(/^Subestació\s+/i, 'SE ')
+      .replace(/^Central Nuclear\s+/i, 'CN ')
+      .replace(/^Cicle Combinat\s+/i, 'CC ')
+      .replace(/^Parc Solar\s+/i, 'Solar ')
+      .replace(/^Parc Eòlic\s+/i, 'Eòlica ')
+      .replace(/^Hidroelèctrica\s+/i, 'Hidro ')
+      .replace(/^Central de Biomassa\s+/i, 'Biomassa ')
+      .replace(/\s*\(.*?\)\s*/g, '')
+      .trim();
+
+    const showMW = (this.camera.zoom >= 1.35 || isHovered) && node.type !== 'SUBSTATION';
+    const mwText = showMW ? ` • ${node.currentPower}MW` : '';
+    const prefix = !isConnected ? '⚠️ ' : '';
+    const labelText = `${prefix}${shortName}${mwText}`;
+
+    ctx.font = isHovered ? 'bold 8.5px Inter, sans-serif' : '600 7.5px Inter, sans-serif';
+    const textWidth = ctx.measureText(labelText).width;
+    const padX = 4.5;
+    const boxW = textWidth + padX * 2;
+    const boxH = 11;
+    const labelY = y + r + 9.5;
+
+    ctx.fillStyle = isHovered
+      ? 'rgba(15, 23, 42, 0.92)'
+      : dayFactor > 0.4
+        ? 'rgba(255, 255, 255, 0.86)'
+        : 'rgba(15, 23, 42, 0.82)';
+    ctx.strokeStyle = !isConnected
+      ? 'rgba(245, 158, 11, 0.8)'
+      : dayFactor > 0.4
+        ? 'rgba(148, 163, 184, 0.6)'
+        : 'rgba(71, 85, 105, 0.7)';
+    ctx.lineWidth = 0.9;
+
+    ctx.beginPath();
+    ctx.roundRect(x - boxW / 2, labelY - boxH / 2, boxW, boxH, 3.5);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = isHovered
+      ? '#FFFFFF'
+      : !isConnected
+        ? (dayFactor > 0.4 ? '#B45309' : '#FBBF24')
+        : dayFactor > 0.4
+          ? '#0F172A'
+          : '#F1F5F9';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labelText, x, labelY + 0.5);
+
+    ctx.restore();
   }
 
   private drawNodeUpgradeBadges(node: GridNode, x: number, y: number, r: number) {

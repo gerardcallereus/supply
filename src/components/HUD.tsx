@@ -239,17 +239,39 @@ export const HUD: React.FC<HUDProps> = ({
             </span>
           </div>
 
-          {/* Pressupost (€) */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-bold font-mono text-xs sm:text-sm">
+          {/* Pressupost (€) + Balanç per segon */}
+          <div
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-bold font-mono text-xs sm:text-sm"
+            title="Pressupost disponible i flux econòmic net en temps real (k€/s)"
+          >
             <Coins className="w-4 h-4 text-emerald-500 shrink-0" />
             <span>{Math.round(telemetry.budgetEuros)} k€</span>
+            {!isPaused && telemetry.netCashflowPerSec !== undefined && Math.abs(telemetry.netCashflowPerSec) >= 0.1 && (
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded-md font-extrabold ${
+                  telemetry.netCashflowPerSec >= 0
+                    ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300'
+                    : 'bg-rose-500/20 text-rose-600 dark:text-rose-300'
+                }`}
+              >
+                {telemetry.netCashflowPerSec > 0 ? `+${telemetry.netCashflowPerSec.toFixed(1)}/s` : `${telemetry.netCashflowPerSec.toFixed(1)}/s`}
+              </span>
+            )}
           </div>
 
           {/* Bateries Disponibles */}
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-xs font-bold text-slate-700 dark:text-slate-300" title="Bateries BESS disponibles per instal·lar">
-            <Battery className="w-4 h-4 text-emerald-500 shrink-0" />
-            <span>{batteriesAvailable} disp.</span>
-          </div>
+          <button
+            onClick={() => onSelectTool(selectedTool === 'BATTERY' ? 'MAT' : 'BATTERY')}
+            className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              selectedTool === 'BATTERY'
+                ? 'bg-emerald-600 text-white ring-2 ring-emerald-400 shadow-md'
+                : 'bg-slate-100 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 hover:bg-emerald-500/15'
+            }`}
+            title="Eina Bateria BESS (Tecla 4): Clica una Subestació o Ciutat per instal·lar-hi una bateria"
+          >
+            <Battery className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{batteriesAvailable} BESS</span>
+          </button>
         </div>
 
       </header>
@@ -560,6 +582,21 @@ export const HUD: React.FC<HUDProps> = ({
           >
             <Scissors className="w-4 h-4 text-rose-400" />
             <span>Desmuntar</span>
+          </button>
+
+          {/* Bateria BESS (Tecla 4) */}
+          <button
+            onClick={() => onSelectTool('BATTERY')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+              selectedTool === 'BATTERY'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 ring-2 ring-emerald-500/50'
+                : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+            title="Instal·lar Bateria BESS a Subestació o Ciutat (Tecla 4)"
+          >
+            <Battery className="w-4 h-4 text-emerald-400" />
+            <span>Bateria BESS</span>
+            <span className="text-xs opacity-75 font-mono">({batteriesAvailable})</span>
           </button>
         </div>
 

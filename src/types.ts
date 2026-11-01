@@ -213,6 +213,7 @@ export interface GameTelemetry {
   scoreMWhDelivered: number;
   curtailedEnergyMWh: number;  // Surplus energy lost/dumped due to lack of batteries
   budgetEuros: number;         // Economic budget in k€ (thousands of euros)
+  netCashflowPerSec?: number;  // Rolling net economic cashflow in k€/s
   etsPenaltyEuros: number;     // Cumulative ETS CO2 penalty in k€
   marketPriceEurMWh: number;   // Dynamic market price in €/MWh
   interconnFlowMW: number;     // Import (+) / Export (-) with France MAT

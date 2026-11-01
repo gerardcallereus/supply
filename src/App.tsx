@@ -100,6 +100,8 @@ export const App: React.FC = () => {
         setSelectedTool('DISTRIBUTION');
       } else if (e.key === '3' || e.key === 'x' || e.key === 'X') {
         setSelectedTool('DELETE');
+      } else if (e.key === '4' || e.key === 'b' || e.key === 'B') {
+        setSelectedTool('BATTERY');
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (interactionRef.current.hoverLineId && simRef.current) {
           simRef.current.removeLine(interactionRef.current.hoverLineId);
@@ -573,6 +575,22 @@ export const App: React.FC = () => {
           if (simRef.current) {
             simRef.current.removeLine(lineId);
             setLines([...simRef.current.lines]);
+            setInventory({ ...simRef.current.inventory });
+            setTelemetry({ ...simRef.current.telemetry });
+          }
+        }}
+        onReinforceLine={(lineId) => {
+          if (simRef.current) {
+            simRef.current.reinforceLine(lineId);
+            setLines([...simRef.current.lines]);
+            setInventory({ ...simRef.current.inventory });
+            setTelemetry({ ...simRef.current.telemetry });
+          }
+        }}
+        onRemoveBattery={(nodeId) => {
+          if (simRef.current) {
+            simRef.current.removeBatteryFromNode(nodeId);
+            setNodes([...simRef.current.nodes]);
             setInventory({ ...simRef.current.inventory });
             setTelemetry({ ...simRef.current.telemetry });
           }
