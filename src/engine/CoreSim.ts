@@ -1561,7 +1561,9 @@ export class CoreSim {
       }
 
       let timer = (this.nodeSpawnTimers.get(node.id) || 0) + dt;
-      const baseInterval = Math.max(3.5, 2000 / Math.max(50, calculatedDemand));
+      // La freqüència d'aparició de ranures de demanda s'adapta a la potència consumida:
+      // A més potència (punta, indústria), el temps entre ranures és menor (més freqüència, sempre d'una en una)
+      const baseInterval = Math.max(2.2, 1700 / Math.max(50, calculatedDemand));
       // Els nodes que encara no estan connectats acumulen demanda més lentament per donar marge de planificació
       const interval = isConnected ? baseInterval : baseInterval * 1.8;
 
@@ -1657,7 +1659,7 @@ export class CoreSim {
   }
 
   private dispatchPacketsFromQueues(dt: number) {
-    // 1. Dispatch from Generators to Substations
+    // 1. Dispatch from Generators to Substations (espaiat rítmic, sense ràfegues superposades)
     for (const node of this.nodes) {
       if (node.type !== 'GENERATOR' || (node.generationQueue || 0) <= 0) continue;
 
@@ -1673,6 +1675,12 @@ export class CoreSim {
         const otherNodeId = line.nodeIds.find(id => id !== node.id);
         if (!otherNodeId) continue;
 
+        // Assegura un espaiat mínim entre paquets a la línia per no enviar blocs enganxats
+        const hasRecentPacket = this.packets.some(
+          p => p.lineId === line.id && p.fromNodeId === node.id && p.t < 0.20
+        );
+        if (hasRecentPacket) continue;
+
         node.generationQueue!--;
         this.spawnPacket(line, node.id, otherNodeId, node.generatorType!);
       }
@@ -1682,7 +1690,8 @@ export class CoreSim {
     for (const node of this.nodes) {
       if (node.type !== 'SUBSTATION' || (node.generationQueue || 0) <= 0) continue;
 
-      // A) First Priority: Connected Consumers that actually have demandSlots > 0
+      // A) First Priority: Connected Consumers amb demanda pendent
+      // REGLA CLAU: S'envia sempre paquet a paquet d'un en un. No s'envien blocs si ja hi ha paquets en camí!
       const outgoingDistLines = this.lines.filter(
         l => !l.isTripped && l.voltage === 'DISTRIBUTION' && l.nodeIds.includes(node.id) && l.currentPacketsCount < l.maxCapacity
       );
@@ -1700,9 +1709,19 @@ export class CoreSim {
         if ((node.generationQueue || 0) <= 0) break;
         const targetId = distLine.nodeIds.find(id => id !== node.id)!;
         const targetNode = this.nodes.find(n => n.id === targetId);
+        if (!targetNode || targetNode.demandSlots <= 0) continue;
 
-        // Only send if consumer has positive unsatisfied demand slots
-        if (targetNode && targetNode.demandSlots > 0) {
+        // Compta quants paquets estan ja volant en camí cap a aquest node consumidor
+        const inFlight = this.packets.filter(p => p.toNodeId === targetId).length;
+        const unsatisfiedSlots = targetNode.demandSlots - inFlight;
+
+        // Espaiat rítmic: no enviar el següent paquet fins que l'anterior hagi avançat prou
+        const hasRecentPacket = this.packets.some(
+          p => p.lineId === distLine.id && p.toNodeId === targetId && p.t < 0.25
+        );
+
+        // Només s'envia 1 paquet si hi ha demanda real no coberta per paquets en vol
+        if (unsatisfiedSlots > 0 && !hasRecentPacket) {
           node.generationQueue!--;
           const preservedSource = this.popSubstationSourceType(node);
           this.spawnPacket(distLine, node.id, targetId, preservedSource);
@@ -1722,6 +1741,12 @@ export class CoreSim {
           const otherId = matLine.nodeIds.find(id => id !== node.id)!;
           const otherNode = this.nodes.find(n => n.id === otherId);
           if (!otherNode) continue;
+
+          // Espaiat rítmic a la línia MAT
+          const hasRecentPacket = this.packets.some(
+            p => p.lineId === matLine.id && p.fromNodeId === node.id && p.t < 0.20
+          );
+          if (hasRecentPacket) continue;
 
           if (otherNode.type === 'SUBSTATION') {
             const otherQ = otherNode.generationQueue || 0;
@@ -1747,18 +1772,6 @@ export class CoreSim {
           node.generationQueue!--;
           const preservedSource = this.popSubstationSourceType(node);
           this.spawnPacket(cand.line, node.id, cand.targetId, preservedSource);
-        }
-      }
-
-      // C) Third Priority: If queue is high (> 4) and no downstream deficit exists anywhere,
-      // feed local consumers as base contract supply to prevent local curtailment and earn revenue
-      if ((node.generationQueue || 0) > 4) {
-        for (const distLine of outgoingDistLines) {
-          if ((node.generationQueue || 0) <= 4) break;
-          const targetId = distLine.nodeIds.find(id => id !== node.id)!;
-          node.generationQueue!--;
-          const preservedSource = this.popSubstationSourceType(node);
-          this.spawnPacket(distLine, node.id, targetId, preservedSource);
         }
       }
     }
@@ -1839,16 +1852,19 @@ export class CoreSim {
         return;
       }
 
-      // If this consumer is satisfied, forward surplus packet to connected consumer with demand
+      // If this consumer is satisfied, forward surplus packet to connected consumer with unsatisfied demand
       const forwardLines = this.lines.filter(
         l => !l.isTripped && l.voltage === 'DISTRIBUTION' && l.nodeIds.includes(node.id) && l.id !== packet.lineId && l.currentPacketsCount < l.maxCapacity
       );
       for (const fLine of forwardLines) {
         const nextId = fLine.nodeIds.find(id => id !== node.id);
         const nextNode = this.nodes.find(n => n.id === nextId);
-        if (nextNode && nextNode.type === 'CONSUMER' && nextNode.demandSlots > 0) {
-          this.spawnPacket(fLine, node.id, nextId!, packet.sourceType);
-          return;
+        if (nextNode && nextNode.type === 'CONSUMER') {
+          const inFlightNext = this.packets.filter(p => p.toNodeId === nextId).length;
+          if (nextNode.demandSlots > inFlightNext) {
+            this.spawnPacket(fLine, node.id, nextId!, packet.sourceType);
+            return;
+          }
         }
       }
 
